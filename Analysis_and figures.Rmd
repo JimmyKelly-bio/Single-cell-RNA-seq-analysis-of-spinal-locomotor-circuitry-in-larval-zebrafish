@@ -1,0 +1,1228 @@
+---
+title: "paper_workflow"
+author: "Jimmy Kelly"
+date: "10/25/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load Libraries 
+```{r}
+library(Seurat,quietly=TRUE)
+library(glmGamPoi,quietly = TRUE)
+library(tidyverse,quietly = TRUE)
+library(ggplot2,quietly = TRUE)
+library(patchwork,quietly = TRUE)
+library(reticulate,quietly=TRUE)
+library(RColorBrewer,quietly = TRUE)#palettes for graphs
+library(viridis,quietly = TRUE)
+library(cowplot)#for plots
+library(scales)#also for plots
+library(plotwidgets)#once again for plots
+library(devEMF)
+library(grDevices)
+library(ggrepel)
+source("Tools_brehm.R")
+```
+
+
+#Read 10X data from a directory location and turn into a Seurat object
+```{r,warning=FALSE}
+file_location= ## your path to matrix files for the run you with to load in
+
+rna_filtered_data<-Read10X(file_location)
+
+rna_filtered<-CreateSeuratObject(counts=rna_filtered_data, project="saig_d4_220215",min.cells=3)
+
+rna_filtered[["percent_mito"]]<-PercentageFeatureSet(rna_filtered, pattern="^mt-")#mt- needs to be lowercase
+
+rm(list=c("rna_filtered_data","file_location"))#clean up object that's no longer needed 
+```
+#basic plots for QC
+#Editable variables
+```{r, warning=FALSE}
+#nFeature max:
+feature_max<-4000
+
+#nFeature min:
+feature_min<-400
+#nCounts max:
+counts_max<-9000
+
+#nCounts min:
+counts_min<-1000 
+
+#percent mitocondrial rna y_max
+mito_max<-5
+
+#First plot has no changes from user settings, shows all data including outliers, also shows cells as points.
+VlnPlot(rna_filtered,features=c("nFeature_RNA","nCount_RNA","percent_mito"),ncol=3)
+
+p1<-VlnPlot(rna_filtered,"nFeature_RNA",y.max=feature_max+1000,pt.size=0)+theme(legend.position = "none")+geom_hline(yintercept = feature_max)+geom_hline(yintercept=feature_min)
+p2<-VlnPlot(rna_filtered,"nCount_RNA",y.max=20000,pt.size=0)+theme(legend.position = "none")+geom_hline(yintercept = counts_max)+geom_hline(yintercept=counts_min)
+p3<-VlnPlot(rna_filtered,"percent_mito",y.max=mito_max+5,pt.size=0)+theme(legend.position = "none")+geom_hline(yintercept = mito_max)
+
+p1|p2|p3#need to remove legends in order for spacing to work in the combined plot
+
+ FeatureScatter(rna_filtered,feature1 = "nFeature_RNA",feature2 = "nCount_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<2000&nFeature_RNA<750)@meta.data))+geom_hline(yintercept=counts_min)+geom_vline(xintercept=feature_min)#test of zoomed in graph
+ 
+ 
+ FeatureScatter(rna_filtered,feature1 = "nFeature_RNA",feature2 = "nCount_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<counts_max+5000)@meta.data))+geom_hline(yintercept=counts_min)+geom_vline(xintercept=feature_min)+geom_hline(yintercept = counts_max)+geom_vline(xintercept = feature_max)
+ 
+  FeatureScatter(rna_filtered,feature1 = "percent_mito",feature2 = "nCount_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<counts_max+5000)@meta.data))+geom_hline(yintercept=counts_min)+geom_hline(yintercept = counts_max)+geom_vline(xintercept = mito_max)
+  
+  FeatureScatter(rna_filtered,feature1 = "percent_mito",feature2 = "nFeature_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<counts_max+5000)@meta.data))+geom_hline(yintercept=feature_min)+geom_hline(yintercept = feature_max)+geom_vline(xintercept = mito_max)
+quality_frame(rna_filtered)#dataset with no quality control
+
+quality_frame(subset(rna_filtered,subset=nCount_RNA>counts_min&nCount_RNA<counts_max &nFeature_RNA>feature_min&nFeature_RNA<feature_max & percent_mito<mito_max))# data set with quality control 
+
+rm(list = c("p1","p2","p3"))
+```
+
+```{r,warning=FALSE}
+#Subset the dataset based on the perameters chosen in the section above
+rna_cells<-subset(rna_filtered,subset=nCount_RNA>counts_min&nCount_RNA<counts_max &nFeature_RNA>feature_min&nFeature_RNA<feature_max & percent_mito<mito_max)
+
+dims<-dim(rna_cells)#[1]is genes [2] is cells #really messy way to do this 
+if(dims[1]<7000){
+  regressable_features=dims[1]*0.8
+}else{
+  regressable_features=7000#can change to be a higher number 
+}
+#limits the number of variable features found by the sct algorithm to 7000 for time. if fewer than 7000 features exist in the data then 80% of features will be the max variable features. 
+rna_cells<-SCTransform(rna_cells,ncells=dims[2]/2,variable.features.n = regressable_features,conserve.memory = TRUE,vst.flavor="v2",vars.to.regress = "percent_mito",do.center=FALSE)#,do.scale = TRUE 
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+ElbowPlot(rna_cells,ndims=50)
+rm(list=c("regressable_featrues","feature_max","feature_min","counts_max","counts_min","mito_max"))
+```
+
+```{r}
+#Number of principle components to use in projection and clustering 
+
+pc<-30
+
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,min.dist = 0.1,seed.use = 42,n.neighbors = 30L,spread = 3)
+
+rna_cells<-RunTSNE(rna_cells,perplexity=30)
+
+rna_cells<-FindNeighbors(rna_cells,n.trees=200,k.param=15,dims=1:pc)
+
+rna_cells<-FindClusters(rna_cells,resolution=1.0,algorithm=4)
+
+#makes a copy of rna_cells so that you can always return to this point of the analysis if you want 
+QAbackup<-rna_cells
+
+DimPlot(rna_cells,label = TRUE)
+DimPlot(rna_cells,label = TRUE,reduction = 'tsne')
+```
+
+```{r}
+data_sets<-c(saig_d4_a,saig_d4_b)
+```
+
+```{r}
+
+features<-SelectIntegrationFeatures(object.list = data_sets,nfeatures = 8000)#9000?
+
+data_sets<-PrepSCTIntegration(object.list = data_sets, anchor.features = features)
+
+anchors<-FindIntegrationAnchors(object.list = data_sets,normalization.method = "SCT",anchor.features = features)
+
+rm(data_sets)
+gc()
+```
+#need to seperate so ram doesn't get filled and unused data can be removed 
+```{r}
+combined<-IntegrateData(anchorset = anchors, normalization.method = "SCT")
+```
+
+```{r}
+pc=30
+combined<-RunPCA(combined,npcs=50,verbose = FALSE)
+combined<-RunUMAP(combined,dims=1:pc,min.dist = 0.1,n.neighbors = 30L,spread = 1.0)
+combined<-FindNeighbors(combined,n.trees=200,k.param=15,dims=1:pc)
+combined<-FindClusters(combined,resolution=1.0,algorithm=4) 
+DimPlot(combined,label=TRUE)
+DimPlot(combined,label = TRUE,group.by = 'orig.ident')
+DimPlot(combined,label = TRUE,split.by = "orig.ident")
+DefaultAssay(combined)<-"integrated"
+
+```
+
+```{r}
+cluster_spine<-DimPlot(rna_cells,label = TRUE,label.size = 3,reduction = "umap")+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("Cluster Plot")
+cluster_spine
+ident_spine<-DimPlot(rna_cells,group.by = "orig.ident",reduction = "umap")+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),axis.line = element_blank(),legend.position = "none")
+ident_spine
+cluster_graph<-integration_graph(rna_cells,label = FALSE)+theme_cowplot()+xlim(0,0.2)+ylim(0,0.2)+theme(legend.position = "blank")
+cluster_graph
+#cluster_number_graph<-integration_graph(rna_cells,values = "number")+theme_cowplot()
+#cluster_number_graph
+ratio_graph<-integrated_cluster_ratio_graph(rna_cells)+theme_cowplot()+ylim(0,2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_text(size = 6),axis.title.y = element_text(size = 9),title = element_blank(),axis.ticks.x = element_blank())
+ratio_graph
+ratio_graph2<-integrated_cluster_ratio_graph(rna_cells,reverse = TRUE)+theme_cowplot()+ylim(0,20)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.title.y = element_text(size = 9),axis.text.y = element_text(size = 9),title = element_blank(),axis.ticks.x = element_blank())+theme(legend.text = element_text(size=8),legend.key.height = )#legend.position = "none",
+ratio_graph2
+ggsave(plot = cluster_graph,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/initial_spine_clustergraph_2.eps",device = "eps",width = 2.5,height = 2.5)
+ggsave(plot = ratio_graph,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/initial_spine_ratiograph_2.eps",device = "eps",width = 2.5,height = 2.5)
+ggsave(plot = ratio_graph2,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/initial_spine_ratiograph_98_15.eps",device = "eps",width = 2.5,height = 2.5)
+ggsave(plot = cluster_spine,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/cluster_spine_2.eps",device = "eps",width = 7,height = 7)
+ggsave(plot = ident_spine,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/ident_spine_2.eps",device = "eps",width = 7,height = 7)
+```
+
+```{r}
+#remove outlier clusters if necessary (in this case cluster 1)
+#outlier clusters
+outlier<-c(1)
+pc<-30
+
+non_outlier<-setdiff(levels(rna_cells),outlier)
+DefaultAssay(rna_cells)<-"integrated"
+rna_cells<-subset(rna_cells,idents=non_outlier)
+rna_cells<-FindVariableFeatures(rna_cells,nfeatures=3000)#recalculate the first 3000 most variable features, needed because the dataset has just been subset #note as the data set gets subset further and further from the one used in integration more variable features will show up that are not a part of the integrated portion of the object. This will cause a set of warnings that variable features cannot be found in the object. This doesn't effect differential analysis or anything else that uses the SCT assay but it will effect clustering and projection. The number of features included in the integration step is somewhat limited, considering too many genes leads to problems in the integrated data set where clusters are no longer distinct, presumably because of the inclusion of genes that are not in fact variable. In our use the limited genes in the integrated object didn't prevent analysis and identification of specific cell types. If you do have a problem then you might try increasing the nfeatures argument in SelectIntegrationFeatures. A more potentially doubious solution could also be to manually add the specific set of genes you'reinterested in to the integration features before feeding them to the anchor.features argument in PrepSCTIntegration. 
+
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,min.dist = 0.1)
+rna_cells<-RunTSNE(rna_cells,dims=1:pc,perplexity=30,seed.use = 505)#this seed produced the best grouping of clusters in tsne for our use. 
+rna_cells<-FindNeighbors(rna_cells,n.trees=200,k.param=20,dims=1:pc)
+rna_cells<-FindClusters(rna_cells,resolution=1.0,algorithm=4)
+
+DimPlot(rna_cells,label = TRUE,group.by = "orig.ident",reduction = "tsne")
+intermediate_1<-DimPlot(rna_cells,label = TRUE,reduction = "tsne")
+intermediate_1
+ggsave(plot = intermediate_1,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/intermediate_spine_2.eps",device = "eps",width = 7,height = 7,units = "in")
+```
+
+#now we need to remove contamination from muscle and hindbrain
+```{r}
+DefaultAssay(rna_cells)<-"SCT"
+DimPlot(rna_cells,reduction = "tsne",label = TRUE)
+#hindbrain
+slc18a2<-FeaturePlot(rna_cells,features = "slc18a2",reduction = "tsne")
+slc18a2
+unc3l<-FeaturePlot(rna_cells,features = "ucn3l",reduction = "tsne")
+unc3l
+tph2<-FeaturePlot(rna_cells,features = "tph2",reduction = "tsne")
+tph2
+#muscle
+
+tnnt3b<-FeaturePlot(rna_cells,features = "tnnt3b",reduction = "tsne")
+tnnt3b
+actc1b<-FeaturePlot(rna_cells,features = "actc1b",reduction = "tsne")
+actc1b
+mylpfa<-FeaturePlot(rna_cells,features = "mylpfa",reduction = "tsne")
+mylpfa
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs",obj_list = list(slc18a2,unc3l,tph2,tnnt3b,actc1b,mylpfa),height = 7,width = 7,type = "eps",units = "in",name.prefix = "suplimental_2_contaminant_")
+rm(list = c('slc18a2','unc3l','tph2','tnnt3b','actc1b','mylpfa'))
+```
+
+
+```{r}
+DefaultAssay(rna_cells)<-"integrated"
+#remove outlier clusters if necessary (in this case clusters 26 and 30)
+#outlier clusters
+outlier<-c(26,30)#
+pc<-30
+
+non_outlier<-setdiff(levels(rna_cells),outlier)
+
+rna_cells<-subset(rna_cells,idents=non_outlier)
+rna_cells<-FindVariableFeatures(rna_cells,nfeatures=3000)#recalculate the first 3000 most variable features, needed because the dataset has just been subset #note as the data set gets subset further and further from the one used in integration more variable features will show up that are not a part of the integrated portion of the object. This will cause a set of warnings that variable features cannot be found in the object. This doesn't effect differential analysis or anything else that uses the SCT assay but it will effect clustering and projection. The number of features included in the integration step is somewhat limited, considering too many genes leads to problems in the integrated data set where clusters are no longer distinct, presumably because of the inclusion of genes that are not in fact variable. In our use the limited genes in the integrated object didn't prevent analysis and identification of specific cell types. If you do have a problem then you might try increasing the nfeatures argument in SelectIntegrationFeatures. A more potentially doubious solution could also be to manually add the specific set of genes you'reinterested in to the integration features before feeding them to the anchor.features argument in PrepSCTIntegration. 
+
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,min.dist = 0.1)
+rna_cells<-RunTSNE(rna_cells,dims=1:pc,perplexity=30,seed.use = 256)#this seed produced the best grouping of clusters in tsne for our use here. Just the result of trial and error, or "emperical testing" #RunTSNE(rna_cells,dims=1:30,perplexity=20,seed.use = 512)#
+rna_cells<-FindNeighbors(rna_cells,n.trees=200,k.param=20,dims=1:pc)
+rna_cells<-FindClusters(rna_cells,resolution=1.0,algorithm=4)
+
+
+DimPlot(rna_cells,label = TRUE)
+DimPlot(rna_cells,label = TRUE,reduction = "tsne")
+```
+
+
+
+#fig1
+```{r}
+DefaultAssay(rna_cells)<-"SCT"
+
+reduct="tsne"
+
+main_reduction<-DimPlot(rna_cells,label=TRUE,reduction=reduct,pt.size = 0.5,label.size = 4)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+main_reduction
+
+
+elavl4<-FeaturePlot(rna_cells,features = 'elavl4',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+elavl4
+snap25a<-FeaturePlot(rna_cells,features = 'snap25a',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+snap25a
+sox10<-FeaturePlot(rna_cells,features = 'sox10',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+sox10
+myrf<-FeaturePlot(rna_cells,features = 'myrf',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+myrf
+gfap<-FeaturePlot(rna_cells,features = 'gfap',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+gfap
+slc1a2b<-FeaturePlot(rna_cells,features = 'slc1a2b',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")#eaat2
+slc1a2b
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(main_reduction,elavl4,snap25a,sox10,myrf,gfap,slc1a2b),type = "eps",name.prefix = "fig1_",height = 7,width = 7,units="in")
+
+```
+
+
+
+
+#isolate the neurons and recluster
+```{r}
+DefaultAssay(rna_cells)<-"integrated"
+#keep only a subset of clusters
+#Clusters you want to keep:
+keep<-c(27,23,24,5,20,30,2,26,19,7,18,3,15,25,28)
+rna_cells<-subset(rna_cells,idents=keep)
+rna_cells<-FindVariableFeatures(rna_cells,nfeatures = 3000)#recalculate the first 3000 most variable features, needed because the dataset has just been subset. initially this is handled by the SCTransform but it doesn't make sense to renormalize with a smaller data set 
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,min.dist = 0.1,n.neighbors = 30L)
+rna_cells<-RunTSNE(rna_cells,dims=1:30,perplexity=20,seed.use = 512)
+rna_cells<-FindNeighbors(rna_cells,n.trees=400,k.param=13,dims=1:pc)#kparam based on the number of cells in total
+rna_cells<-FindClusters(rna_cells,resolution=1.5,algorithm=4)
+
+
+DimPlot(rna_cells,label=TRUE)
+DimPlot(rna_cells,label=TRUE,reduction = "tsne")
+rm(keep)
+```
+#set a backup of the neuronal set we can return to after changes or subsets to the dataset to produce particular figures 
+```{r}
+neuronal<-rna_cells
+```
+
+#fig2 a and b
+```{r}
+DefaultAssay(rna_cells)<-"SCT"
+
+reduct="tsne"
+
+main_reduction<-DimPlot(rna_cells,label=FALSE,reduction=reduct,pt.size = 0.5,label.size = 4)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")+ggtitle("Neurons")
+main_reduction
+
+
+chata<-FeaturePlot(rna_cells,features = 'chata',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+chata
+slc18a3a<-FeaturePlot(rna_cells,features = 'slc18a3a',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+slc18a3a
+slc5a7a<-FeaturePlot(rna_cells,features = 'slc5a7a',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+slc5a7a
+slc17a6a<-FeaturePlot(rna_cells,features = 'slc17a6a',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+slc17a6a
+slc17a6b<-FeaturePlot(rna_cells,features = 'slc17a6b',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+slc17a6b
+gad1b<-FeaturePlot(rna_cells,features = 'gad1b',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+gad1b
+gad2<-FeaturePlot(rna_cells,features = 'gad2',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")#eaat2
+gad2
+slc6a5<-FeaturePlot(rna_cells,features = 'slc6a5',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")
+slc6a5
+slc32a1<-FeaturePlot(rna_cells,features = 'slc32a1',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")#eaat2
+slc32a1
+
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(main_reduction,chata,slc18a3a,slc17a6a,slc17a6b,gad1b,gad2,slc32a1,slc6a5),type = "eps",name.prefix = "fig2_",height = 7,width = 7,units="in")
+rm(list = c("slc17a6a","slc17a6b","slc18a3a","chata","slc6a5","slc32a1","gad1b","gad2"))
+```
+
+
+
+#set the identities we used 
+```{r}
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 6))<-"v1"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = c(24,30)))<-"v2b"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 22))<-"CoLo"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 32))<-"DoLA"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = c(29,19,23)))<-"v2a"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = c(21,31)))<-"RB"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 9))<-"v0v"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 5))<-"v0c"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 17))<-"v2s"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 27))<-"dI1"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 11))<-"dI2"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = c(10,15)))<-"KA"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = c(4,26,1,7,2,20)))<-"MN"
+```
+#store these new identities in the reference object
+```{r}
+neurons[["interneurons"]]<-Idents(rna_cells)
+```
+
+#fig2C
+```{r}
+DimPlot(rna_cells,reduction="tsne",label = TRUE)
+levels(rna_cells)<-c("MN","v0c","v0v","v2a","dI2","dI1","v2s","v2b","v1","CoLo","DoLA","RB","KA","3","8","12","13","14","16","18","25","28","33")#set up the order of the idents for the dot plot
+fig2_dotplot<-DotPlot(rna_cells,features = c("slc6a5","gad2","slc17a6b","chata","pkd1l2a","tal1","tal2","p2rx3a","pnoca","chga","foxd3","sp9","en1b","nkx1.2lb","irx1a","lhx9","barhl1b","barhl2","vsx2","shox2","evx1","evx2","isl1","mnx1","mnx2b"),scale.by = 'size',dot.scale=4,idents = c("RB","KA" ,"dI1","dI2","v0c","v0v","v1","v2s","v2a","v2b","MN","CoLo","DoLA"),scale = FALSE) +theme(axis.text.x = element_text(angle = -45, vjust = 1.0, hjust=0,size = 8),axis.text.y = element_text(size = 8),legend.text = element_text(size = 8),legend.title = element_text(size=9))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.5,keywidth = 0.7),color=guide_colorbar(title = " Average \n Expression",barheight = 3.2,barwidth = 1.0))+ scale_colour_viridis_c(begin = 0,end = 0.9)#,dot.min=0.15,dot.scale=5,axis.title.x = element_blank(),axis.title.y = element_blank() + scale_colour_viridis_c(begin = 0,end = 0.9)#various genes that were once in this plot ,"urp1","sst1.1" "slc32a1","gad1b","slc17a6a","slc18a3a","gata2a","gata3","bhlhe23",(bhlhe23 is shown in dI2 in mouse but we see it in V1)
+fig2_dotplot<-fig2_dotplot+theme(panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2))#add gridlines, color is a medium grey
+
+fig2_dotplot
+
+
+#ggsave(plot = fig2_dotplot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig_2_celltype_dotplot.eps",width = 7.5,height=3.0,units = "in",device = "eps")
+```
+#fig3
+```{r}
+pnoca<-FeaturePlot(rna_cells,features = 'pnoca',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+pnoca
+chga<-FeaturePlot(rna_cells,features = 'chga',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+chga
+chga_threshold<-FeaturePlot(rna_cells,features = 'chga',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5,max.cutoff = 1.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("chga threshold")
+chga_threshold
+chata<-FeaturePlot(rna_cells,features = 'chata',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+chata
+slc18a3a<-FeaturePlot(rna_cells,features = 'slc18a3a',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+slc18a3a
+slc17a6b<-FeaturePlot(rna_cells,features = 'slc17a6b',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+slc17a6b
+mnx1<-FeaturePlot(rna_cells,features = 'mnx1',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+mnx1
+mnx2b<-FeaturePlot(rna_cells,features = 'mnx2b',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+mnx2b
+isl1<-FeaturePlot(rna_cells,features = 'isl1',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 0.5)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+isl1
+
+
+v0c_graph<-FeaturePlot(rna_cells,features = c("chata","slc17a6b"),blend = TRUE,max.cutoff = 0.5,reduction = reduct)#max cutoff is less than one read (with SCT normalization ~0.66) so that this featureplot only shows the presence or absence of colocation not detail about levels of colocation. the v0c cluster is cropped out in a later image processor because getting the shape of the plotted graph to match between v0c in the neuronal data set and v0c as a subsetted group
+v0c_graph
+
+
+ggsave(plot=v0c_graph,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig3_v0c_transporter.eps",device = "eps",width = 28,height = 7)
+
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(pnoca,mnx1,mnx2b,isl1,chga,chga_threshold,chata,slc17a6b,slc18a3a),type = "eps",name.prefix = "fig3_",height = 7,width = 7,units="in")
+rm(list = c("pnoca","mnx1","mnx2b","isl1","chga","v0c_graph","chga_threshold","chata","slc17a6b","slc18a3a"))
+```
+
+#zoomed in plots #fig4
+```{r}
+Idents(rna_cells)<-"seurat_clusters"#switch back to the individual clusters because it makes doing subsequent manipulation of the zoomed in clusters easier 
+v2a<-subset(rna_cells,idents = c(29,19,23))#v2a
+zoomed_in<-DimPlot(v2a,label=TRUE,reduction=reduct,pt.size = 0.5,label.size = 4)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("v2a_zoomed")
+zoomed_in
+vsx2<-FeaturePlot(v2a,features = 'vsx2',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+vsx2
+shox2<-FeaturePlot(v2a,features = 'shox2',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+shox2
+gjd2b<-FeaturePlot(v2a,features = 'gjd2b',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+gjd2b
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(zoomed_in,vsx2,shox2,gjd2b),type = "eps",name.prefix = "fig4_zoomed_v2a_",height = 7,width = 7,units="in")
+rm(list = c("zoomed_in","vsx2","shox2","gjd2b","v2a"))
+
+```
+#KA zoomed for fig4
+```{r}
+Idents(rna_cells)<-"seurat_clusters"
+KA<-subset(rna_cells,idents = c(10,15))#KA
+zoomed_in<-DimPlot(KA,label=TRUE,reduction=reduct,pt.size = 0.5,label.size = 4)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("KA_zoomed")
+zoomed_in
+pkd1l2a<-FeaturePlot(KA,features = 'pkd1l2a',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none")+ggtitle("pkd1l2a")
+pkd1l2a
+
+sst1<-FeaturePlot(KA,features = 'sst1.1',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("sst1.1")
+sst1
+urp1<-FeaturePlot(KA,features = 'urp1',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("urp1")
+urp1
+pkd2l1<-FeaturePlot(KA,features = 'pkd2l1',cols = c("lightgrey","blue"),reduction=reduct,pt.size = 2)+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())+ggtitle("pkd2l1")
+pkd2l1
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(zoomed_in,pkd1l2a,sst1,urp1,pkd2l1),type = "eps",name.prefix = "fig4_zoomed_KA_",height = 7,width = 7,units="in")
+rm(list = c("KA","zoomed_in","pkd1l2a","sst1","urp1","pkd2l1"))#"pkd2l1",  pkd2l1,
+
+```
+
+#for emphisised groups in feature plots
+#v0C
+```{r}
+#TODO rewrite so it just pulls a subset of the embedding data without needing to subset the object outright 
+highlight_group<-c("v0c")
+Idents(rna_cells)<-'interneurons' #needs some way of getting a set of the neuronal data with the interneurons as the seurat identities
+rna_cells<-subset(rna_cells,idents = highlight_group)#get a seurat object of just the group to be highlighted
+highlighted<-rna_cells@reductions$tsne@cell.embeddings#pull out embeddings
+rna_cells<-neurons
+rna_cells<-subset(rna_cells,idents=setdiff(levels(rna_cells),highlight_group))#get a seurat object of everything but the group to be highlighted
+broad<-rna_cells@reductions$tsne@cell.embeddings
+broad<-as.data.frame(broad)
+highlighted<-as.data.frame(highlighted)
+highlighted$type<-"highlight"
+broad$type<-"background"
+highlight<-rbind(broad,highlighted)#combine the embeddings from both objects into one dataframe and then plot with the highlighted cells in a different color than the background 
+highlight_plot<-ggplot(data = highlight,aes(tSNE_1,tSNE_2,color=type))+geom_point()+scale_color_manual(values = c("#D3D3D3","#FF7878"))+theme_cowplot()+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")#dark grey "#838383"
+highlight_plot
+ggsave(plot = highlight_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig3_highlighted_v0c.eps",device = "eps",width = 7,height = 7,units="in") 
+
+rm(list=c("highlight_group","broad","highlighted","highlight_plot"))
+```
+
+#highlight v2a for fig4
+```{r}
+#TODO rewrite so it just pulls the embedding data without needing to subset the object outright 
+highlight_group<-c("v2a")
+Idents(rna_cells)<-'interneurons' #needs some way of getting a set of the neuronal data with the interneurons as the seurat identities
+rna_cells<-subset(rna_cells,idents = highlight_group)#get a seurat object of just the group to be highlighted
+highlighted<-rna_cells@reductions$tsne@cell.embeddings#pull out embeddings
+rna_cells<-neurons
+rna_cells<-subset(rna_cells,idents=setdiff(levels(rna_cells),highlight_group))#get a seurat object of everything but the group to be highlighted
+broad<-rna_cells@reductions$tsne@cell.embeddings
+broad<-as.data.frame(broad)
+highlighted<-as.data.frame(highlighted)
+highlighted$type<-"highlight"
+broad$type<-"background"
+highlight<-rbind(broad,highlighted)#combine the embeddings from both objects into one dataframe and then plot with the highlighted cells in a different color than the background 
+highlight_plot<-ggplot(data = highlight,aes(tSNE_1,tSNE_2,color=type))+geom_point()+scale_color_manual(values = c("#D3D3D3","#FF7878"))+theme_cowplot()+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")#dark grey "#838383"
+highlight_plot
+ggsave(plot = highlight_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig4_highlighted_v2a.eps",device = "eps",width = 7,height = 7,units="in") 
+
+rm(list=c("highlight_group","broad","highlighted","highlight_plot"))
+```
+
+#KA
+```{r}
+#TODO rewrite so it just pulls the embedding data without needing to subset the object outright 
+highlight_group<-c("KA")
+Idents(rna_cells)<-'interneurons' #needs some way of getting a set of the neuronal data with the interneurons as the seurat identities
+rna_cells<-subset(rna_cells,idents = highlight_group)#get a seurat object of just the group to be highlighted
+highlighted<-rna_cells@reductions$tsne@cell.embeddings#pull out embeddings
+rna_cells<-neurons
+rna_cells<-subset(rna_cells,idents=setdiff(levels(rna_cells),highlight_group))#get a seurat object of everything but the group to be highlighted
+broad<-rna_cells@reductions$tsne@cell.embeddings
+broad<-as.data.frame(broad)
+highlighted<-as.data.frame(highlighted)
+highlighted$type<-"highlight"
+broad$type<-"background"
+highlight<-rbind(broad,highlighted)#combine the embeddings from both objects into one dataframe and then plot with the highlighted cells in a different color than the background 
+highlight_plot<-ggplot(data = highlight,aes(tSNE_1,tSNE_2,color=type))+geom_point()+scale_color_manual(values = c("#D3D3D3","#FF7878"))+theme_cowplot()+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")
+highlight_plot
+ggsave(plot = highlight_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig4_highlighted_KA.eps",device = "eps",width = 7,height = 7,units="in")
+
+rm(list=c("highlight_group","broad","highlighted","highlight_plot"))
+```
+
+#fig4 over
+#isolate the motor neurons 
+#subsets out the mn from the saig dataset will be used to create the combined mn dataset later
+```{r}
+DefaultAssay(rna_cells)<-"integrated"
+#keep only a subset of clusters
+#Clusters you want to keep:
+keep<-c(26,6,1,3,9,19)
+rna_cells<-subset(rna_cells,idents=keep)
+rna_cells<-FindVariableFeatures(rna_cells,nfeatures = 3000)#recalculate the first 3000 most variable features, needed because the dataset has just been subset
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,min.dist = 0.1,n.neighbors = 30L)
+rna_cells<-RunTSNE(rna_cells,dims=1:30,perplexity=20,seed.use = 512)
+rna_cells<-FindNeighbors(rna_cells,n.trees=400,k.param=15,dims=1:pc)
+rna_cells<-FindClusters(rna_cells,resolution=1.0,algorithm=4)
+
+
+DimPlot(rna_cells,label=TRUE)
+DimPlot(rna_cells,label=TRUE,reduction = "tsne")
+rm(keep)
+saig_mn<-rna_cells
+```
+
+#isolate the MN from the spinal set, same with the mnx1 sorted set. Then pull out the id for the individual sets from the original datasets and integrate all four groups of motor neurons   
+
+#fig 5 part 1 shows the highlighted motor neurons for both datasets and expression of mn markers in those sets 
+#these steps are for the saig unsorted data set the plots for mnx1 FACS sorted data are made once that data set is introduced 
+#MN need to be set as an identity group called "Motor Neurons", as written the saig set is stored in an abject called "neuronal"  
+```{r}
+rna_cells<-neuronal
+highlight_group<-c("Motor Neurons")
+Idents(rna_cells)<-'interneurons' #needs some way of getting a set of the neuronal data with the interneurons as the seurat identities
+rna_cells<-subset(rna_cells,idents = highlight_group)#get a seurat object of just the group to be highlighted
+highlighted<-rna_cells@reductions$tsne@cell.embeddings#pull out embeddings
+rna_cells<-neuronal#reset from the un subset dataset
+rna_cells<-subset(rna_cells,idents=setdiff(levels(rna_cells),highlight_group))#get a seurat object of everything but the group to be highlighted
+broad<-rna_cells@reductions$tsne@cell.embeddings
+broad<-as.data.frame(broad)
+highlighted<-as.data.frame(highlighted)
+highlighted$type<-"highlight"
+broad$type<-"background"
+highlight<-rbind(broad,highlighted)#combine the embeddings from both objects into one dataframe and then plot with the highlighted cells in a different color than the background 
+highlight_plot<-ggplot(data = highlight,aes(tSNE_1,tSNE_2,color=type))+geom_point()+scale_color_manual(values = c("#D3D3D3","#FF7878"))+theme_cowplot()+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")
+highlight_plot
+ggsave(plot = highlight_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig5_highlighted_motor_neurons.eps",device = "eps",width = 7,height = 7,units="in")
+
+#rm(list=c("highlight_group","broad","highlighted","highlight_plot"))
+```
+#fig5
+```{r}
+chata<-FeaturePlot(rna_cells,features = 'chata',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+chata
+slc18a3a<-FeaturePlot(rna_cells,features = 'slc18a3a',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+slc18a3a
+isl1<-FeaturePlot(rna_cells,features = 'isl1',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+isl1
+mnx1<-FeaturePlot(rna_cells,features = 'mnx1',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+mnx1
+mnx2b<-FeaturePlot(rna_cells,features = 'mnx2b',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+mnx2b
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(chata,slc18a3a,isl1,mnx1,mnx2b),type = "eps",name.prefix = "fig5_saig_",height = 7,width = 7,units="in")
+rm("chata","slc18a3a","isl1","mnx1","mnx2b")
+```
+
+
+
+#handle the FACS sorted mnx1 
+```{r,warning=FALSE}
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/filtered_feature_bc_matrix_21098"#day4 for paper
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/filtered_feature_bc_matrix_220215"#day4 for paper
+
+
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/sequencing_data_sept2021/cacna1ab_11_3"#day3
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/CEL210928PB_mnx_d4/filtered"#d4MNX1
+
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/CEL210928PB_saig_d7/filtered"#d7SAIG
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/CEL210928PB_saig_d4/filtered"#d4saig
+
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/CEL220214PB_saigd7_b/filtered_feature_bc_matrix/"#d7saig_b
+
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/CEL220215PB_saigd4_b/filtered_feature_bc_matrix" #d4saig_b
+
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/CEL220216PB_mnx1_b/filtered_feature_bc_matrix"
+
+#file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/Sequencing_data_new_reference/filtered_feature_bc_mnx1_210928"
+
+file_location="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/sequencing_data/Sequencing_data_new_reference/filtered_feature_bc_mnx1_220216"
+rna_filtered_data<-Read10X(file_location)
+
+rna_filtered<-CreateSeuratObject(counts=rna_filtered_data, project="mnx1_d4_220216",min.cells=3)
+
+rna_filtered[["percent_mito"]]<-PercentageFeatureSet(rna_filtered, pattern="^mt-")#mt- needs to be lowercase, COX3 is for the inccorectly annotated mitochondrial gene in lawson annotation |^COX3$"
+
+
+rm(list=c("rna_filtered_data","file_location"))#clean up object that's no longer needed 
+```
+
+```{r, warning=FALSE}
+#nFeature max:
+feature_max<-4000
+
+#nFeature min:
+feature_min<-400
+#nCounts max:
+counts_max<-9000#how to set a reasonable max?
+
+#nCounts min:
+counts_min<-1500#1500 seems kinda high especially for the second set of data but it seems warranted given the quality of the data that is kept in with a cutoff at 1000 still going from 15000 cells to 6000 is quite the fall  
+
+#percent mitocondrial rna y_max
+mito_max<-5
+
+#First plot has no changes from user settings, shows all data including outliers, also shows cells as points.
+VlnPlot(rna_filtered,features=c("nFeature_RNA","nCount_RNA","percent_mito"),ncol=3)
+
+
+p1<-VlnPlot(rna_filtered,"nFeature_RNA",y.max=feature_max+1000,pt.size=0)+theme(legend.position = "none")+geom_hline(yintercept = feature_max)+geom_hline(yintercept=feature_min)
+p2<-VlnPlot(rna_filtered,"nCount_RNA",y.max=20000,pt.size=0)+theme(legend.position = "none")+geom_hline(yintercept = counts_max)+geom_hline(yintercept=counts_min)# can also use counts_max+10000 for y.max if 20000 is too restrictive
+p3<-VlnPlot(rna_filtered,"percent_mito",y.max=mito_max+5,pt.size=0)+theme(legend.position = "none")+geom_hline(yintercept = mito_max)
+
+p1|p2|p3#need to remove legends in order for spacing to work in the combined plot
+
+ FeatureScatter(rna_filtered,feature1 = "nFeature_RNA",feature2 = "nCount_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<2000&nFeature_RNA<750)@meta.data))+geom_hline(yintercept=counts_min)+geom_vline(xintercept=feature_min)#test of zoomed in graph
+ 
+ 
+ FeatureScatter(rna_filtered,feature1 = "nFeature_RNA",feature2 = "nCount_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<counts_max+5000)@meta.data))+geom_hline(yintercept=counts_min)+geom_vline(xintercept=feature_min)+geom_hline(yintercept = counts_max)+geom_vline(xintercept = feature_max)
+ 
+  FeatureScatter(rna_filtered,feature1 = "percent_mito",feature2 = "nCount_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<counts_max+5000)@meta.data))+geom_hline(yintercept=counts_min)+geom_hline(yintercept = counts_max)+geom_vline(xintercept = mito_max)
+  
+  FeatureScatter(rna_filtered,feature1 = "percent_mito",feature2 = "nFeature_RNA",cells=rownames(subset(rna_filtered,subset =nCount_RNA<counts_max+5000)@meta.data))+geom_hline(yintercept=feature_min)+geom_hline(yintercept = feature_max)+geom_vline(xintercept = mito_max)
+quality_frame(rna_filtered)#dataset with no quality control
+
+quality_frame(subset(rna_filtered,subset=nCount_RNA>counts_min&nCount_RNA<counts_max &nFeature_RNA>feature_min&nFeature_RNA<feature_max & percent_mito<mito_max))
+
+rm(list = c("p1","p2","p3"))
+```
+
+```{r,warning=FALSE}
+#Subset the dataset based on the perameters chosen in the section above
+rna_cells<-subset(rna_filtered,subset=nCount_RNA>counts_min&nCount_RNA<counts_max &nFeature_RNA>feature_min&nFeature_RNA<feature_max & percent_mito<mito_max)
+
+dims<-dim(rna_cells)#[1]is cells [2] is features #really messy way to do this 
+if(dims[1]<5000){
+  regressable_features=dims[1]*0.8
+}else{
+  regressable_features=7000#can change to be a higher number 
+}
+#limits the number of variable features found by the sct algorithm to 7000 for time. if fewer than 5000 features exist in the data then 80% of features will be the max variable features. see https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1874-1 for a full acounting of how sct works   
+
+#do the regression over a subset of the features. reread the sctransform paper to find the right proportion 
+rna_cells<-SCTransform(rna_cells,ncells=dims[2]/2,variable.features.n = regressable_features,conserve.memory = TRUE,vst.flavor="v2",vars.to.regress = "percent_mito",do.center=FALSE)#,do.scale = TRUE 
+
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+ElbowPlot(rna_cells,ndims=50)
+rm(list=c("regressable_featrues","feature_max","feature_min","counts_max","counts_min","mito_max"))
+```
+
+#this step is not strictly necissary but does allow you to look at each data set individually prior to integration
+```{r}
+#Number of principle components to use in projection and clustering 
+pc<-30
+
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,min.dist = 0.1,seed.use = 42,n.neighbors = 30L,spread = 3)
+
+rna_cells<-RunTSNE(rna_cells,perplexity=30)
+
+rna_cells<-FindNeighbors(rna_cells,n.trees=200,k.param=15,dims=1:pc)
+
+rna_cells<-FindClusters(rna_cells,resolution=1.0,algorithm=4)
+
+#makes a copy of rna_cells so that you can always return to this point of the analysis if you want 
+QAbackup<-rna_cells
+
+DimPlot(rna_cells,label = TRUE)
+DimPlot(rna_cells,label = TRUE,reduction = 'tsne')
+```
+
+#same plots as above but use the mnx1 FACS data
+```{r}
+mnx1<-FeaturePlot(rna_cells,features = 'mnx1',reduction='tsne')+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+mnx1
+
+mnx2b<-FeaturePlot(rna_cells,features = 'mnx2b',reduction='tsne')+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+mnx2b
+
+isl1<-FeaturePlot(rna_cells,features = 'isl1',reduction='tsne')+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+isl1
+
+slc18a3a<-FeaturePlot(rna_cells,features = 'slc18a3a',reduction='tsne')+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+slc18a3a
+
+chga<-FeaturePlot(rna_cells,features = 'chga',reduction='tsne')+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+chga
+
+nr2f1a<-FeaturePlot(rna_cells,features = 'nr2f1a',reduction='tsne')+theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),legend.position = "none",axis.line = element_blank())
+nr2f1a
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(mnx1,mnx2b,isl1,slc18a3a,chga,nr2f1a),type = "eps",name.prefix = "fig5_mnx1_",height = 7,width = 7,units="in")
+rm(list = c("mnx1","mnx2b","isl1","slc18a3a","chga","nr2f1a"))
+
+
+```
+#now integrate the mnx1 FACS sorted 
+#need to seperate steps so ram doesn't get filled and used objects can be removed 
+```{r}
+data_sets<-c(mnx1_d4_a,mnx1_d4_b)
+```
+
+```{r}
+
+features<-SelectIntegrationFeatures(object.list = data_sets,nfeatures = 8000)
+
+data_sets<-PrepSCTIntegration(object.list = data_sets, anchor.features = features)
+
+anchors<-FindIntegrationAnchors(object.list = data_sets,normalization.method = "SCT",anchor.features = features)
+
+rm(data_sets)
+gc()
+```
+
+```{r}
+combined<-IntegrateData(anchorset = anchors, normalization.method = "SCT")
+```
+
+```{r}
+pc=30
+combined<-RunPCA(combined,npcs=50,verbose = FALSE)
+combined<-RunUMAP(combined,dims=1:pc,min.dist = 0.1,n.neighbors = 30L,spread = 1.0)
+combined<-FindNeighbors(combined,n.trees=200,k.param=15,dims=1:pc)
+combined<-FindClusters(combined,resolution=1.0,algorithm=4)#algorithm 4 can't run if the data set is too large needs more ram than this computer has  
+DimPlot(combined,label=TRUE)
+DimPlot(combined,label = TRUE,group.by = 'orig.ident')
+DimPlot(combined,label = TRUE,split.by = "orig.ident")
+DefaultAssay(combined)<-"integrated"
+```
+
+```{r}
+rna_cells<-combined
+```
+
+```{r}
+DimPlot(rna_cells,label = TRUE)
+DimPlot(rna_cells,group.by = "orig.ident")
+cluster_graph<-integration_graph(rna_cells)
+cluster_graph
+```
+
+#fig 5 part 1 shows the highlighted motor neurons for both datasets and expression of mn markers in those sets 
+```{r}
+
+highlight_group<-c("Motor Neurons")
+Idents(rna_cells)<-'interneurons' #needs some way of getting a set of the neuronal data with the interneurons as the seurat identities
+rna_cells<-subset(rna_cells,idents = highlight_group)#get a seurat object of just the group to be highlighted
+highlighted<-rna_cells@reductions$tsne@cell.embeddings#pull out embeddings
+rna_cells<-neuronal#reset from the un subset dataset
+rna_cells<-subset(rna_cells,idents=setdiff(levels(rna_cells),highlight_group))#get a seurat object of everything but the group to be highlighted
+broad<-rna_cells@reductions$tsne@cell.embeddings
+broad<-as.data.frame(broad)
+highlighted<-as.data.frame(highlighted)
+highlighted$type<-"highlight"
+broad$type<-"background"
+highlight<-rbind(broad,highlighted)#combine the embeddings from both objects into one dataframe and then plot with the highlighted cells in a different color than the background 
+highlight_plot<-ggplot(data = highlight,aes(tSNE_1,tSNE_2,color=type))+geom_point()+scale_color_manual(values = c("#D3D3D3","#FF7878"))+theme_cowplot()+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")
+highlight_plot
+ggsave(plot = highlight_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig5_highlighted_motor_neurons.eps",device = "eps",width = 7,height = 7,units="in")
+
+#rm(list=c("highlight_group","broad","highlighted","highlight_plot"))
+```
+#fig5
+```{r}
+chata<-FeaturePlot(rna_cells,features = 'chata',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+chata
+slc18a3a<-FeaturePlot(rna_cells,features = 'slc18a3a',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+slc18a3a
+isl1<-FeaturePlot(rna_cells,features = 'isl1',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+isl1
+mnx1<-FeaturePlot(rna_cells,features = 'mnx1',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+mnx1
+mnx2b<-FeaturePlot(rna_cells,features = 'mnx2b',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+mnx2b
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(chata,slc18a3a,isl1,mnx1,mnx2b),type = "eps",name.prefix = "fig5_saig_",height = 7,width = 7,units="in")
+rm("chata","slc18a3a","isl1","mnx1","mnx2b")
+```
+
+###fig5 example plots for facs sorted data
+```{r}
+chata<-FeaturePlot(rna_cells,features = 'chata',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+chata
+slc18a3a<-FeaturePlot(rna_cells,features = 'slc18a3a',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+slc18a3a
+isl1<-FeaturePlot(rna_cells,features = 'isl1',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+isl1
+mnx1<-FeaturePlot(rna_cells,features = 'mnx1',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+mnx1
+mnx2b<-FeaturePlot(rna_cells,features = 'mnx2b',reduction=reduct)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+mnx2b
+
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(chata,slc18a3a,isl1,mnx1,mnx2b),type = "eps",name.prefix = "fig5_mnx1_",height = 7,width = 7,units="in")
+rm("chata","slc18a3a","isl1","mnx1","mnx2b")
+```
+
+
+#subset out the non motor neuron cells from the FACS sorted 
+```{r}
+#remove outlier clusters if necessary 
+#outlier clusters
+outlier<-c(20,16,21,10)
+pc<-30
+
+non_outlier<-setdiff(levels(rna_cells),outlier)
+
+rna_cells<-subset(rna_cells,idents=non_outlier)
+rna_cells<-FindVariableFeatures(rna_cells,nfeatures=5000)#recalculate the first 5000 most variable features, needed because the dataset has just been subset 
+
+rna_cells<-RunPCA(rna_cells,npcs=50,verbose = FALSE)
+rna_cells<-RunUMAP(rna_cells,dims=1:pc,umap.method = 'umap-learn',metric = "correlation",min.dist = 0.1)
+rna_cells<-RunTSNE(rna_cells,perplexity=30)
+rna_cells<-FindNeighbors(rna_cells,n.trees=200,k.param=20,dims=1:pc)
+rna_cells<-FindClusters(rna_cells,resolution=1.0,algorithm=4)
+
+
+DimPlot(rna_cells,label = TRUE)
+
+```
+
+#now we need to split the motor neurons from the saig data set into single seurat objects as well as the FACS sorted motor neurons into individual seurat objects in order to integrate them. The initial integration of the mnx1 FACS sorted samples is to observe possible batch effects between the two presumably identical populations of cells. The way it's done here it to get the cell barcodes for the desired cells from the integrated objects and then subset the individual datasets so they are just the desired cells and then integrate those. It feels like it should be possible to integrate the two already integrated objects because they still have the raw umi count matricies in them but the SCT normalization assay created problems I wasn't able to solve quickly so I did this as a work around. It's fine as long as you are very careful with keeping track of the lists of cell barcodes because for this to work you need to strip off the _# seurat adds to them to make them unique. So until you integrate the data, and seurat adds new idnetifiers for each source object, the lists of cell barcodes contain some entries that have the same cell barcode but refer to different cells.  
+
+```{r}
+saig_210928_cells<-WhichCells(saig_mn,expression=orig.ident=="saig_d4_210928")
+saig_220215_cells<-WhichCells(saig_mn,expression=orig.ident=="saig_d4_220215")
+mnx1_210928_cells<-WhichCells(mnx1_FACS,expression=orig.ident=="mnx1_d4_210928")
+mnx1_220216_cells<-WhichCells(mnx1_FACS,expression=orig.ident=="mnx1_d4_220216")
+
+saig_210928<-clean_cells(saig_210928)#need to remove the "_#" from the cell ids. Seurat adds them to keep the cells unique between runs. function just takes off the last two digits from the cell name
+saig_220215_cells<-clean_cells(saig_210215_cells)
+mnx1_210928_cells<-clean_cells(mnx1_210928_cells)
+mnx1_220216_cells<-clean_cells(mnx1_210216_cells)
+
+#subsetting the original data objects so that they only have the cells we have pulled from the integrated objects, unsuprisingly requires that we have the original objects loaded in our environment. 
+Idents(saig_210928,cells=saig_210928_cells)<-"keepers"
+saig_210928<-subset(saig_210928,idents="keepers")
+
+Idents(saig_220215,cells=saig_220215_cells)<-"keepers"
+saig_220215<-subset(saig_220215,idents="keepers")
+
+Idents(mnx1_210928,cells=mnx1_210928_cells)<-"keepers"
+mnx1_210928<-subset(mnx1_210928,idents="keepers")
+
+Idents(mnx1_220216,cells=mnx1_220216_cells)<-"keepers"
+mnx1_220216<-subset(mnx1_220216,idents="keepers")
+
+data_sets<-c(saig_210928,saig_220215,mnx1_210928,mnx1_220216)
+```
+
+```{r}
+
+features<-SelectIntegrationFeatures(object.list = data_sets,nfeatures = 8000)
+
+data_sets<-PrepSCTIntegration(object.list = data_sets, anchor.features = features)
+
+anchors<-FindIntegrationAnchors(object.list = data_sets,normalization.method = "SCT",anchor.features = features)
+
+rm(data_sets)
+gc()
+```
+
+```{r}
+combined<-IntegrateData(anchorset = anchors, normalization.method = "SCT")
+rna_cells<-combined
+```
+#do the normalization and reduction
+```{r}
+
+```
+#tsne projection used with this data
+```{r}
+rna_cells<-RunTSNE(rna_cells,dims=1:30,perplexity=35,seed.use=64)#
+
+DimPlot(rna_cells,reduction = "tsne",label = TRUE)
+```
+
+
+```{r}
+DefaultAssay(rna_cells)<-"integrated"
+pc=30
+
+rna_cells<-FindNeighbors(rna_cells,n.trees=400,k.param=40,dims=1:pc)#might want to adjust kparam based on the number of cells in total
+
+rna_cells<-FindClusters(rna_cells,resolution=0.6,algorithm=4)#note sometimes this produces a warning message about reticulate saying that values being coerced to integer range introduced NA values. This is an issue with reticulate and the python version of lieden alg. It is still able to recreate the benchmarking example from the lieden alg documentation. See https://cran.r-project.org/web/packages/leiden/vignettes/benchmarking.html 
+
+DimPlot(rna_cells,label = TRUE,reduction = "tsne")
+
+DimPlot(rna_cells,label = TRUE,reduction = "umap")
+
+```
+
+
+#fig5 integrated plot
+```{r}
+dim_plot<-DimPlot(rna_cells,reduction="tsne",label=FALSE)+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")
+dim_plot
+
+nr2f1a<-FeaturePlot(rna_cells,reduction = "tsne",label = FALSE,features = "nr2f1a")+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")
+nr2f1a
+chga<-FeaturePlot(rna_cells,reduction = "tsne",label = FALSE,features = "chga")+theme(axis.title.x = element_blank(),axis.title.y = element_blank(),axis.line.x = element_blank(),axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.ticks.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),legend.position = "none")
+chga
+ggsave(plot = dim_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig5_dimplot.eps",device = "eps",width = 7,height = 7,units="in")
+ggsave(plot = nr2f1a,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig5_nr2f1a.eps",device = "eps",width = 7,height = 7,units="in")
+ggsave(plot = chga,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig5_chga.eps",device = "eps",width = 7,height = 7,units="in")
+```
+
+###a set of images for showing how we combined the motor neurons from the facs sorted data set and the non facs sorted dataset
+#non-facs sorted motor neurons
+
+#Supplimental motor neuron source data 
+```{r}
+lab_plot<-DimPlot(rna_cells,label = TRUE,pt.size = 0.01)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())+ggtitle("clusters")#legend.position = "none",
+lab_plot
+orig_plot<-DimPlot(rna_cells,label = FALSE,group.by = "orig.ident",pt.size = 0.01)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())#legend.position = "none",
+orig_plot
+cluster_plot<-integration_graph(rna_cells,label = FALSE)+theme_cowplot()+xlim(0,0.15)+ylim(0,0.15)+theme(legend.position = "blank",axis.title = element_text(size=9),axis.text = element_text(size=9))
+cluster_plot
+ggsave(plot = cluster_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/supplemental_mn_source_cluster_plot.eps",height = 2,width = 2,units = "in",device = "eps")
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs",obj_list = list(lab_plot,orig_plot),type = "eps",name.prefix = "supplemental_mn_source_",height = 7,width = 7,units="in")
+rm("lab_plot","orig_plot","cluster_plot")
+```
+
+#suplimental integrated motor neurons
+```{r}
+DimPlot(rna_cells,reduction = "tsne")
+DimPlot(rna_cells,reduction = "tsne",group.by = "orig.ident")
+gfra1a<-FeaturePlot(rna_cells,reduction = "tsne",features = "gfra1a")+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+tbx3b<-FeaturePlot(rna_cells,reduction = "tsne",features = "tbx3b")+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+gfra1a
+tbx3b
+ggsave(plot = gfra1a,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/MN_gfra1a.eps',height = 7,width = 7,device = "eps",units = "in")
+ggsave(plot = tbx3b,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/MN_tbx3b.eps',height = 7,width = 7,device = "eps",units = "in")
+```
+#more suplimental motor neuron
+```{r}
+rna_cells[["source"]]<-"blank"
+rna_cells[["source"]][rna_cells@meta.data$orig.ident=='mnx1_d4_220216',]<-"Sorted"
+rna_cells[["source"]][rna_cells@meta.data$orig.ident=='mnx1_d4_210928',]<-"Sorted"
+rna_cells[["source"]][rna_cells@meta.data$orig.ident=='saig_d4_210928',]<-"Non_Sorted"
+rna_cells[["source"]][rna_cells@meta.data$orig.ident=='saig_d4_220215',]<-"Non_Sorted"
+
+Idents(rna_cells)<-"source"
+levels(rna_cells)<-c("Sorted","Non_Sorted")
+DimPlot(rna_cells,reduction = "tsne",split.by = "source")+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+sup_component<-DimPlot(rna_cells,reduction = "tsne")+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+sup_component
+ggsave(plot = sup_component,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/MN_components.eps",height = 7,width = 7,device = "eps",units = "in")
+
+
+Idents(rna_cells)<-"types"
+DimPlot(rna_cells,reduction="tsne",label=TRUE)
+cluster_graph<-integration_graph(rna_cells,data_source = "source")+theme_cowplot()+xlim(0,1)+ylim(0,1)#+scale_y_continuous(expand = c(0,0))+scale_x_continuous(expand = c(0,0))
+cluster_graph
+
+integrated_cluster_percent_graph(rna_cells,data_source = "source")+theme_cowplot()+ylim(0,100)
+
+ggsave(plot = cluster_graph,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/MN_cluster.eps",height = 4,width = 4,device = "eps",units = "in")
+
+Idents(rna_cells)<-"classes"
+fig7_compare<-DotPlot(rna_cells,split.by = "source",cols = c('blue','red'),features = c("sncgb","cplx2l","vamp1","stxbp1a","snap25a","syt2a","syt2b","stx1b","zgc:92912","sypa","sypb","nsfa","sv2c",'cplx1',"cadpsb","syn2a","syt12","rims2a","syt3","pcp4a","sv2bb","pclob","sv2a","syngr3b","bsnb","vapb","napba","napgb","clta","kcnc3a","cacna1ab","scn4ba","scn8aa","scn8ab","kcna1a","cacng2a","scn1bb"),idents = c("Primary","Secondary"),dot.scale = 3,scale=FALSE,scale.by = "size")+theme(axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1),panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35))#,color=guide_colorbar(title = " Average \n Expression",barheight = 1.6,barwidth = 0.5)
+fig7_compare
+
+fig7_test<-DotPlot(rna_cells,split.by = "source",cols = c('blue','red'),features = c("sncgb","cplx2l","vamp1","stxbp1a","snap25a","syt2a","syt2b","stx1b","zgc:92912","sypa","sypb","nsfa","sv2c",'cplx1',"cadpsb","syn2a","syt12","rims2a","syt3","pcp4a","sv2bb","pclob","sv2a","syngr3b","bsnb","vapb","napba","napgb","clta","kcnc3a","cacna1ab","scn4ba","scn8aa","scn8ab","kcna1a","cacng2a","scn1bb"),idents = c("Primary"),dot.scale = 3,scale=FALSE,scale.by = "size")+theme(axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1),panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35))#,color=guide_colorbar(title = " Average \n Expression",barheight = 1.6,barwidth = 0.5)
+fig7_test
+
+fig7_test2<-DotPlot(rna_cells,split.by = "source",cols = c('blue','red'),features = c("sncgb","cplx2l","vamp1","stxbp1a","snap25a","syt2a","syt2b","stx1b","zgc:92912","sypa","sypb","nsfa","sv2c",'cplx1',"cadpsb","syn2a","syt12","rims2a","syt3","pcp4a","sv2bb","pclob","sv2a","syngr3b","bsnb","vapb","napba","napgb","clta","kcnc3a","cacna1ab","scn4ba","scn8aa","scn8ab","kcna1a","cacng2a","scn1bb"),idents = c("Secondary"),dot.scale = 3,scale=FALSE,scale.by = "size")+theme(axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1),panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35))#,color=guide_colorbar(title = " Average \n Expression",barheight = 1.6,barwidth = 0.5)
+fig7_test2
+
+data.plot<-fig7_compare$data
+  
+split_onescale<-ggplot(data = data.plot, mapping = aes_string(x = "features.plot", 
+    y = "id")) + geom_point(mapping = aes_string(size = "pct.exp", 
+    color = "avg.exp.scaled")) + scale_size(range = c(0, 3), 
+    limits = c(NA, NA)) + theme(axis.title.x = element_blank(), 
+    axis.title.y = element_blank()) + guides(size = guide_legend(title = "Percent Expressed")) + theme_cowplot()+theme(panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2),axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1))+ scale_color_gradient(low = "grey", high = "blue")+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35),color=guide_colorbar(title = " Average \n Expression",barheight = 3.0,barwidth = 0.8))
+split_onescale
+ggsave(plot = split_onescale,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/MN_split_onescale.eps",height = 2,width = 7,device = "eps",units = "in")
+
+ggsave(plot = fig7_compare,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/MN_compare.eps",height = 2,width = 7,device = "eps",units = "in")
+
+```
+#fig5 dimplot of the motor neurons with the assigned clusters
+```{r}
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = 8))<-"Primary"
+Idents(rna_cells,cells=WhichCells(rna_cells,idents = c(1,2,3,4,5,6,7,10)))<-"Secondary"
+#9 is left over because it's the gfra1a group whos provenance is unclear at this timepoint
+cluster_plot_types<-DimPlot(rna_cells,label = FALSE,reduction=reduct,cols = c("#F8766D","#00BFC4","#D3D3D3"))+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())#colors are grey and then the default red and blue that dimplot would normally generate
+cluster_plot_types
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(cluster_plot_types),type = "eps",name.prefix = "fig5_dimplot_celltypes",height = 7,width = 7,units="in")
+rm("cluster_plot_types")
+```
+#fig6
+```{r}
+ DefaultAssay(rna_cells)<-"SCT"
+cluster_plot<-DimPlot(rna_cells,label = TRUE,label.size = 10,reduction=reduct)+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())
+cluster_plot
+ggsave(plot = cluster_plot,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/figure6_dimplot.eps",width = 7,height = 7,units="in")
+rm(cluster_plot)
+```
+
+#fig6 secondary markers plots
+```{r}
+DefaultAssay(rna_cells)<-"SCT"
+bmp16<-FeaturePlot(rna_cells,features = "bmp16",reduction=reduct,pt.size = 0.4)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank(),legend.position = "none")
+bmp16
+foxb1b<-FeaturePlot(rna_cells,features = "foxb1b",reduction=reduct,pt.size = 0.4)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank(),legend.position = "none")
+foxb1b
+alcamb<-FeaturePlot(rna_cells,features = "alcamb",reduction=reduct,pt.size = 0.4)+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank(),legend.position = "none")
+alcamb
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(bmp16,foxb1b,alcamb),type = "eps",name.prefix = "fig6_",height = 7,width = 7,units="in")
+rm("bmp16","foxb1b","alcamb")
+```
+
+#fig7
+```{r}
+DefaultAssay(rna_cells)<-"SCT"
+mn_dotplot<-DotPlot(rna_cells,features = c("syt2b","sncgb","cplx2l","vamp1","stxbp1a","pcp4a","snap25a","zgc:92912","sypa","sv2c","syt2a","stx1b","cplx1","syt12","sypb","cadpsb","syn2a","sv2bb","rims2a","syt3","pclob","bsnb","sv2a","syngr3b","vapb","napba","napgb","clta","sncb",'syt11a',"snap25b","kcnc3a","scn4ba","cacna1ab","scn8ab","scn8aa","kcna1a","cacna2d1a","scn1bb","scn1lab","cacnb4b","cacna1bb"),idents = c("Primary","Secondary"),dot.scale = 3,scale=FALSE,scale.by = "size")+theme(axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1),panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35),color=guide_colorbar(title = " Average \n Expression",barheight = 1.6,barwidth = 0.5))+scale_colour_viridis_c(begin = 0,end = 0.9)
+#
+mn_dotplot
+#channel_dotplot
+
+ggsave(filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig7_synaptic_channel_dotplot.eps",plot = mn_dotplot,device = "eps",width = 6.75,height = 1.5,units = "in")
+```
+
+#fig7
+#dimplot of the motor neurons with the assigned clusters
+```{r}
+
+cluster_plot_types<-DimPlot(rna_cells,label = FALSE,reduction=reduct,cols = c("#F8766D","#00BFC4"))+theme(legend.position = "none",axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank())#colors are grey and then the default red and blue that dimplot would normally generate
+cluster_plot_types
+batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper",obj_list = list(cluster_plot_types),type = "eps",name.prefix = "fig7_dimplot_celltypes",height = 7,width = 7,units="in")
+rm("cluster_plot_types")
+```
+
+```{r}
+DefaultAssay(rna_cells)<-"SCT"
+
+scn4ba<-FeaturePlot(rna_cells,features = "scn4ba",cols = c("light grey","red"),reduction = "tsne")+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank(),legend.position = "none")#full mn
+scn4ba
+
+cacna1ab<-FeaturePlot(rna_cells,features = "cacna1ab",cols = c("light grey","blue"),reduction = "tsne")+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank(),legend.position = "none")
+cacna1ab
+
+kcnc3a<-FeaturePlot(rna_cells,features = "kcnc3a",cols = c("light grey","dark green"),reduction = "tsne")+theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),axis.line = element_blank(),legend.position = "none")
+kcnc3a
+
+total=length(WhichCells(rna_cells,idents="Primary"))
+
+#finds the number of cells with particular types of expression overlap. finds all cells with all three genes then finds allcells with at least rwo and subtracts the number of cells with three, then finds the number of cells with any one of the genes and subtracts the number of cells with all three or any to then finds the number of cells with none of the genes. then these numbers are added togethre and checked against thetotal number of cells, they should be equal 
+all_three<-length(WhichCells(rna_cells,idents="Primary",expression = scn4ba>0&cacna1ab>0&kcnc3a>0))
+
+any_two<-length(WhichCells(rna_cells,idents="Primary",expression = (scn4ba&cacna1ab>0)|(scn4ba&kcnc3a>0)|(kcnc3a>0&cacna1ab>0)))-all_three
+
+any_one<-length(WhichCells(rna_cells,idents="Primary",expression = scn4ba>0|cacna1ab>0|kcnc3a>0))-all_three-any_two
+
+none<-length(WhichCells(rna_cells,idents="Primary",expression = scn4ba==0&cacna1ab==0&kcnc3a==0))
+  
+length(WhichCells(rna_cells,idents="Primary"))==(all_three+any_two+any_one+none)#sanity check
+
+coexpression<-data.frame(names=factor(c("All Three","Only Two","Only One","None"),ordered = TRUE,levels = c("All Three","Only Two","Only One","None")),cells=c((all_three/total)*100,(any_two/total)*100,(any_one/total)*100,(none/total)*100),cluster=c("Primary","Primary","Primary","Primary"))
+
+#repeat the same process for the secondaries, probably a better way of doing this in a more compact way
+total_secondary=length(WhichCells(rna_cells,idents="Secondary"))
+
+all_three_secondary<-length(WhichCells(rna_cells,idents="Secondary",expression = scn4ba>0&cacna1ab>0&kcnc3a>0))
+
+any_two_secondary<-length(WhichCells(rna_cells,idents="Secondary",expression = (scn4ba&cacna1ab>0)|(scn4ba&kcnc3a>0)|(kcnc3a>0&cacna1ab>0)))-all_three_secondary
+
+any_one_secondary<-length(WhichCells(rna_cells,idents="Secondary",expression = scn4ba>0|cacna1ab>0|kcnc3a>0))-all_three_secondary-any_two_secondary
+
+none_secondary<-length(WhichCells(rna_cells,idents="Secondary",expression = scn4ba==0&cacna1ab==0&kcnc3a==0))
+  
+length(WhichCells(rna_cells,idents="Secondary"))==(all_three_secondary+any_two_secondary+any_one_secondary+none_secondary)#sanity check
+
+coexpression_secondary<-data.frame(names=factor(c("All Three","Only Two","Only One","None"),ordered = TRUE,levels = c("All Three","Only Two","Only One","None")),cells=c((all_three_secondary/total_secondary)*100,(any_two_secondary/total_secondary)*100,(any_one_secondary/total_secondary)*100,(none_secondary/total_secondary)*100),cluster=c("Secondary","Secondary","Secondary","Secondary"))
+
+coexpression_combined<-rbind(coexpression,coexpression_secondary)
+
+
+ggsave(plot = scn4ba,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig7_scn4ba.eps",width = 7,height = 7,units = "in")
+
+ggsave(plot = cacna1ab,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig7_cacna1ab.eps",width = 7,height = 7,units = "in")
+
+ggsave(plot = kcnc3a,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig7_kcnc3a.eps",width = 7,height = 7,units = "in")
+
+
+bar_combined<-ggplot(data = coexpression_combined,aes(x=names,y=cells,fill=cluster))+geom_bar(stat = "identity",position = "dodge",color="black")+scale_fill_manual(values=c("#3A3B3C","grey"))+ggtitle("Coexpression")+theme_cowplot()+theme(axis.title.x = element_blank(),title = element_text(hjust = 0.5))+ylab("% Of Total Cells")+ylim(0,60)
+bar_combined
+
+ggsave(plot = bar_combined,filename = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig7_bar_combined.eps",width = 6,height = 4,units = "in")
+
+```
+
+#make a barplot of the expression of the elements of the casette in the primaries vs secondaries
+```{r}
+total_primary=ncol(subset(rna_cells,idents="Primary"))
+total_secondary=ncol(subset(rna_cells,idents="Secondary"))
+
+b4_pmn<-length(WhichCells(rna_cells,idents="Primary",expression = scn4ba>0))
+kv_pmn<-length(WhichCells(rna_cells,idents="Primary",expression = kcnc3a>0))
+pq_pmn<-length(WhichCells(rna_cells,idents="Primary",expression = cacna1ab>0))
+
+b4_smn<-length(WhichCells(rna_cells,idents="Secondary",expression = scn4ba>0))
+kv_smn<-length(WhichCells(rna_cells,idents="Secondary",expression = kcnc3a>0))
+pq_smn<-length(WhichCells(rna_cells,idents="Secondary",expression = cacna1ab>0))
+
+coexpression_primary<-data.frame(names=factor(c("PQ","KV3.3","B4"),ordered = TRUE,levels = c("PQ","KV3.3","B4")),cells=c((pq_pmn/total_primary)*100,(kv_pmn/total_primary)*100,(b4_pmn/total_primary)*100),cluster=c("Primary","Primary","Primary"))
+coexpression_secondary<-data.frame(names=factor(c("PQ","KV3.3","B4"),ordered = TRUE,levels = c("PQ","KV3.3","B4")),cells=c((pq_smn/total_secondary)*100,(kv_smn/total_secondary)*100,(b4_smn/total_secondary)*100),cluster=c("Secondary","Secondary","Secondary"))
+
+coex_combined<-rbind(coexpression_primary,coexpression_secondary)
+bar_combined<-ggplot(data = coex_combined,aes(x=names,y=cells,fill=cluster))+scale_fill_manual(values=c("#3A3B3C","grey"))+geom_bar(stat = "identity",position = "dodge",color="black")+ggtitle("Cells Expressed")+theme_cowplot()+theme(axis.title.x = element_blank(),title = element_text(hjust = 0.5))+ylab("% Of Total Cells")+ylim(0,100)
+bar_combined
+
+ggsave(filename="/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig7_barplot_cassettelevels.eps",plot=bar_combined,device = "eps",width = 6,height = 4,units = "in")
+
+```
+#Gene ontology with enrichr
+```{r}
+setEnrichrSite("FishEnrichr")
+
+if(is.null(listEnrichrDbs())) stop("website isn't live, check enrichR website and your connection")
+
+data_bases<-c("GO_Biological_Process_2018")
+
+#note the DEG list was split into two lists one for primaries and one for secondaries combining primary markers and secodnary markers together gives the deg list generated by FindMarkers 
+enriched_primary<-enrichr(genes = rownames(primary_markers),databases = data_bases)
+enriched_primary
+significant_primary<-enriched_primary$GO_Biological_Process_2018[enriched_primary$GO_Biological_Process_2018$Adjusted.P.value<0.05,]#extract only the GO terms with a significant adjusted pvalue
+p_bio<-plotEnrich(significant_primary,showTerms = dim(significant_primary)[1],numChar=40,y="count",orderBy = "P.value")+ggtitle("Primary Biological Process")
+p_bio_table<-enriched_primary[[1]]
+p_bio_table<-data.frame(names = row.names(p_bio_table), p_bio_table)
+write_csv(p_bio_table,file = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/test_p_bio_table.csv")
+p_bio
+enriched_secondary<-enrichr(genes=rownames(secondary_markers),databases = data_bases)
+enriched_secondary
+significant_secondary<-enriched_secondary$GO_Biological_Process_2018[enriched_secondary$GO_Biological_Process_2018$Adjusted.P.value<0.05,]
+s_bio<-plotEnrich(significant_secondary,showTerms = dim(significant_secondary)[1],numChar = 40,y="count",orderBy = "P.value")+ggtitle("Secondary Biological Process")
+s_bio
+
+#batch_plot_save(directory = "/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures",obj_list = list(p_bio,p_mol,p_cell,s_bio,s_mol,s_cell),width = 18,height = 18,units = "in",type="eps",name.prefix = "GO_")
+```
+#make the gene ontology graph that we use
+```{r}
+go_plot<-ggplot(data = primary_group_list,aes(x=abs(log10(primary_group_list$Adjusted.P.value)),y=fct_rev(factor(primary_group_list$GO_term,levels =primary_group_list$GO_term ))))+geom_bar(stat="identity")+theme_cowplot()+coord_cartesian(expand = FALSE)+xlab('-log10(p value)')+ylab("GO Term")#+geom_vline(xintercept = 1.3)#line is the significance threshold of 0.05 adj p val
+
+ggsave(go_plot,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/GO_bargraph.eps',device = "eps",width = 4,height = 7)
+```
+
+
+#extract the primary and secondary motor neurons that originated in the saig data set from the combined motor neuron set
+```{r}
+rna_cells<-motor_neurons
+Idents(rna_cells)<-"types"
+primaries<-subset(rna_cells,idents = "Primary")
+Idents(primaries)<-"orig.ident"
+saig_pmn<-WhichCells(primaries,idents = c("saig_d4_210928","saig_d4_220215"))#first find the primaries and then the cells sourced from the saig cells
+
+
+Idents(rna_cells)<-"types"
+secondaries<-subset(rna_cells,idents = c("Secondary","7"))
+Idents(secondaries)<-"orig.ident"
+saig_smn<-WhichCells(secondaries,idents = c("saig_d4_210928","saig_d4_220215"))
+
+#integrated cells have the _# on the end of the cell barcodes In this case the spinal saig data set has 210928 as _1 and 220215 as _2 because of the order that the mn integrated set was constructed the same is true for it, 210928 as _1 and 220215 as _2, and the mnx1 FACS sources are _3 and _4. because of this we don't need to fiddle arround with editing cell names to pull the saig cells out of the mn set and use them to more accurately name the cells in the full spinal set.This next step checks that that is indeed the case  
+
+rna_cells<-spine#change rna cells to the spinal set for modification and refernce
+
+unique(rna_cells[["orig.ident"]])#gives the additions to the cell barcode used for each original sample
+unique(primaries[["orig.ident"]])#gives the cell barcodes in the integrated motor neurons
+#If the numbered underscores for the saig lines don't match between the sets then don't continue and instead pull them out manually, similar to how the cells from each individual run were pulled out for the integrated motor neuron data
+Idents(rna_cells)<-"interneurons"
+
+Idents(rna_cells,cells=saig_pmn)<-"Primary MN"
+
+Idents(rna_cells,cells=saig_smn)<-"Secondary MN"
+
+DimPlot(rna_cells,label = TRUE,reduction = "tsne")
+```
+
+
+#we show in fig 4 that chga is a marker for CoLo but the cluster that includes those cells is cleanly split between cells with and without chga expression. We show this with the positioning of the label in fig2. The resolution limit is a well known issue with any modularity based clustering algorithm suggesting that this community could well be two communities that were too small to resolve overall. Improtantly we only have conformation that chga is a marker for CoLo so we split out the chga positive group here as the named CoLo cluster
+```{r}
+
+```
+#fig8
+```{r}
+cassette_dotplot<-DotPlot(rna_cells,features =c("cacna1ab","kcnc3a","scn4ba"),idents=c("RB","KA+","KA-","dI1","dI2","v0c","v0v","v1","v2s","v2a type1","v2a type2","v2b","Primary MN","Secondary MN","CoLo","DoLA"),dot.scale = 3,scale=FALSE,scale.by = "size")+theme(axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1),panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35),color=guide_colorbar(title = " Average \n Expression",barheight = 1.6,barwidth = 0.5))+scale_colour_viridis_c(begin = 0,end = 0.9)+coord_flip()
+cassette_dotplot
+
+ggsave(cassette_dotplot,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig8_dotplot.eps',device = "eps",width = 3.5,height = 1.5,units = "in")
+
+```
+#needs to take a set of channels and a set of identities and output a bargraph that shows the levels of coexpression of a set of channels 
+#the data manipulation in this step is done in the custom function coexpress_bar which you can find in the tools.R file that acompanied this one 
+```{r}
+
+
+coexpress_full<-coexpress_bar(rna_cells,idents = c("Primary MN","Secondary MN","v2a type1","v2a type2", "v0v","v0c","dI1","dI2","v2b","v2s","v1","CoLo","DoLA","RB","KA+","KA-"),genes = c("cacna1ab","kcnc3a","scn4ba"),bar.width = NULL)+theme(axis.text = element_text(size = 7),axis.title = element_text(size = 9),title = element_blank())+scale_y_continuous(expand = c(0,0),limits = c(0,60))
+coexpress_full
+
+ggsave(plot=coexpress_full,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/figures_for_paper/fig8coexpressplot_alltypes.eps',device = "eps",width = 6.0,height = 3.5,units = "in")
+```
+
+#fig8_b
+
+```{r}
+fig8_b_dot<-DotPlot(rna_cells,features =c("syt2a","syt2b","cplx2l","vamp1","stxbp1a","snap25a","zgc:92912"),idents=c("RB","KA+","KA-","dI1","dI2","v0c","v0v","v1","v2s","v2a type1","v2a type2","v2b","Primary MN","Secondary MN","CoLo","DoLA"),dot.scale = 3,scale=FALSE,scale.by = "size")+theme(axis.line = element_blank(),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size = 6),axis.text.y = element_text(size = 6),axis.title = element_blank(),legend.text = element_text(size = 5),legend.title = element_text(size=6),panel.border = element_rect(color = "black",fill = NA,size=1))+guides(size = guide_legend(title = " Percent \n Expressed",keyheight = 0.35,keywidth = 0.35),color=guide_colorbar(title = " Average \n Expression",barheight = 1.6,barwidth = 0.5))+scale_colour_viridis_c(begin = 0,end = 0.9)+coord_flip()#,panel.grid = element_line(color = "#7D7F7C",size = 0.20,linetype = 2)
+fig8_b_dot
+fig8_b_bar<-coexpress_bar(rna_cells,idents = c("Primary MN","Secondary MN","v2a type1","v2a type2", "v0v","v0c","dI1","dI2","v2b","v2s","v1","CoLo","DoLA","RB","KA+","KA-"),genes = c("syt2a","syt2b","cplx2l","vamp1","stxbp1a","snap25a","zgc:92912"),bar.width = 0.8)+theme(axis.text = element_text(size = 7),axis.title = element_text(size = 9),title = element_blank())+scale_y_continuous(expand = c(0,0),limits = c(0,80))+ggtitle("suplimental_bar")
+fig8_b_bar
+ggsave(plot=fig8_b_dot,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/supplimental_7_cassette_dot.eps',device = "eps",width = 3.8,height = 2.4,units = "in")
+
+ggsave(plot=fig8_b_bar,filename = '/Users/jimmykelly/Documents/Work_OHSU/RNA_sequencing/suplimental_figs/supplimental_7_cassette_bar.eps',device = "eps",width = 3.1,height = 1.5,units = "in")
+```
